@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { getSupabaseEnv } from "@/lib/supabase/env";
 import { createClient } from "@/lib/supabase/server";
 import { SetupNotice } from "@/components/setup-notice";
@@ -17,6 +18,10 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  if (!user) {
+    redirect("/login");
+  }
 
   return (
     <div className="flex min-h-screen flex-col md:flex-row">

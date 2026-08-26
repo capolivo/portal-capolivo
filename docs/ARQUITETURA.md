@@ -9,7 +9,7 @@ Bling ERP  --(OAuth2, sync incremental)-->  Edge Function (Supabase)  -->  Postg
                                                                     view cliente_metricas (RFM)
                                                                                 |
                                                                                 v
-                                                              Next.js (Vercel)  <-- equipe Capolivo
+                                                              Next.js (Netlify)  <-- equipe Capolivo
 ```
 
 - **Supabase** é a fonte única de dados do portal (não se lê o Bling diretamente do frontend).
@@ -21,17 +21,29 @@ Bling ERP  --(OAuth2, sync incremental)-->  Edge Function (Supabase)  -->  Postg
 
 ## Por que essa stack
 
-- **Next.js + Vercel:** deploy simples, free tier cobre uso interno de uma empresa pequena, e é
-  um app web responsivo — funciona em celular pelo navegador sem custo de loja de app.
+- **Next.js + Netlify:** deploy simples, free tier cobre uso interno de uma empresa pequena, e é
+  um app web responsivo — funciona em celular pelo navegador sem custo de loja de app. O plano
+  original era Vercel, mas o cadastro deles exigia verificação por SMS que não chegava no celular
+  cadastrado — sem alternativa de contornar isso, migramos para o Netlify (login por
+  e-mail/GitHub, sem SMS).
 - **Supabase:** Postgres gerenciado + Auth + Row Level Security + Edge Functions no mesmo
   projeto, free tier generoso (500MB de banco, suficiente por muito tempo para este volume de
   dados).
 - **Bling API v3 (OAuth2):** é o único jeito suportado hoje de acessar dados do Bling
   programaticamente.
 
-Custo esperado para começar: **R$ 0** (ambos free tier). Vercel Pro (~US$20/mês) e Supabase Pro
+Custo esperado para começar: **R$ 0** (ambos free tier). Netlify Pro (~US$19/mês) e Supabase Pro
 (~US$25/mês) só se tornam necessários se o uso crescer bastante (mais usuários simultâneos, mais
 dados, mais chamadas de API) — não é esperado nesta fase inicial.
+
+**Importante — Edge Middleware não é usado:** o Next.js tem um mecanismo de "proxy"
+(`proxy.ts`/antigo `middleware.ts`) que roda antes de cada rota. Tentamos usá-lo para checar login,
+mas o empacotador de Edge Functions do Netlify não conseguiu compilar o `proxy.ts` gerado pelo
+Next.js 16 (Turbopack) — erro `Cannot find module './chunks/[turbopack]_runtime.js'`. Em vez de
+tentar contornar isso, a checagem de sessão foi movida para dentro do
+`app/(dashboard)/layout.tsx` (redireciona pra `/login` se não houver usuário) e para as rotas de
+API do Bling que precisam de sessão. Mais simples de depurar e não depende de suporte a Edge
+Runtime do host.
 
 ## Passo a passo de configuração
 
@@ -80,12 +92,24 @@ npx supabase secrets set BLING_CLIENT_ID=... BLING_CLIENT_SECRET=...
 Agende a execução periódica (ex.: a cada 6h) via `pg_cron` chamando a função, ou via um agendador
 externo (cron job, GitHub Actions) fazendo `POST` no endpoint da função.
 
-### 4. Frontend (Vercel)
+### 4. Frontend (Netlify)
 
-1. Crie um projeto em [vercel.com](https://vercel.com), conecte o repositório.
-2. Configure as mesmas variáveis do `.env.local` (exceto `SUPABASE_SERVICE_ROLE_KEY`, que não é
-   usada pelo frontend) nas **Environment Variables** do projeto Vercel.
-3. Deploy automático a cada push.
+Site já criado: **https://portal-capolivo.netlify.app** (conta Netlify da Capolivo, time
+"capolivo's team", plano Free).
+
+1. CLI: `npx netlify login` (autoriza pelo navegador, sem SMS) → `npx netlify link` (se for outra
+   máquina) → `npx netlify deploy --prod` para publicar.
+2. Variáveis de ambiente já configuradas via `netlify env:set` (`NEXT_PUBLIC_SUPABASE_URL`,
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY` — `SUPABASE_SERVICE_ROLE_KEY` não é usada pelo frontend). Para
+   alterar: `npx netlify env:set NOME valor`.
+3. **Visibilidade do site:** contas novas do Netlify criam projetos como privados por padrão
+   ("Team protection" — exige login na conta Netlify pra ver o site). Foi trocado manualmente em
+   **Site configuration → Visitor access** para "Public". Se criar um site novo no mesmo time,
+   confira essa configuração — o padrão do time já foi ajustado para "Public", mas só vale para
+   projetos criados depois dessa mudança.
+4. Deploy não é automático a cada push ainda (não conectamos um repositório Git ao Netlify, só
+   fizemos deploy manual via CLI a partir da pasta local). Se quiser deploy automático, conectar o
+   repositório GitHub ao site no painel do Netlify.
 
 ## Modelo de dados
 

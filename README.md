@@ -6,6 +6,8 @@ banco próprio (Supabase) e mostra frequência de compra e melhores clientes.
 Contexto de negócio e regras de conteúdo estão em [CLAUDE.md](./CLAUDE.md). Decisões técnicas e
 passo a passo de configuração estão em [docs/ARQUITETURA.md](./docs/ARQUITETURA.md).
 
+**Produção:** https://portal-capolivo.netlify.app
+
 ## Rodando localmente
 
 ```bash
@@ -24,8 +26,8 @@ vez de quebrar — normal na primeira vez.
 - **Frontend:** Next.js (App Router) + TypeScript + Tailwind CSS v4, identidade visual Capolivo.
 - **Backend:** Supabase (Postgres + Auth + Row Level Security + Edge Functions).
 - **Integração:** Bling API v3 (OAuth2), sincronização incremental via Edge Function agendada.
-- **Deploy recomendado:** Vercel (frontend) + Supabase (dados), ambos com free tier — ver
-  [docs/ARQUITETURA.md](./docs/ARQUITETURA.md) para detalhes e custos.
+- **Deploy:** Netlify (frontend) + Supabase (dados), ambos com free tier — ver
+  [docs/ARQUITETURA.md](./docs/ARQUITETURA.md) para detalhes, custos e como publicar mudanças.
 
 ## Estrutura
 

@@ -1,13 +1,23 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
+import { createClient } from "@/lib/supabase/server";
 
 // TODO: confirmar esta URL contra a documentação atual em developer.bling.com.br
 // antes do primeiro uso — endpoints de API podem mudar.
 const BLING_AUTHORIZE_URL = "https://www.bling.com.br/Api/v3/oauth/authorize";
 
-// Inicia o fluxo OAuth2 do Bling (passo manual, único). O proxy (middleware) já
-// exige sessão para qualquer rota fora de /login, então não repetimos o check aqui.
-export async function GET() {
+// Inicia o fluxo OAuth2 do Bling (passo manual, único). Só a equipe logada no
+// portal pode disparar isto.
+export async function GET(request: NextRequest) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
   const clientId = process.env.BLING_CLIENT_ID;
   const redirectUri = process.env.BLING_REDIRECT_URI;
 

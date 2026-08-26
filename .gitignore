@@ -43,3 +43,10 @@ supabase/.temp
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local Netlify folder
+.netlify
+deno.lock
+
+# claude code harness runtime files
+.claude/scheduled_tasks.lock
