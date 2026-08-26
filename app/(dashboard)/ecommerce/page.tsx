@@ -7,7 +7,6 @@ type PedidoEcommerce = {
   id: string;
   data_pedido: string;
   valor_total: number;
-  status: string | null;
   frete: number | null;
   uf_destino: string | null;
   valor_difal: number | null;
@@ -21,7 +20,7 @@ export default async function EcommercePage() {
   const { data, error } = await supabase
     .from("pedidos")
     .select(
-      "id, data_pedido, valor_total, status, frete, uf_destino, valor_difal, informacao_complementar, cliente_id, clientes(nome)",
+      "id, data_pedido, valor_total, frete, uf_destino, valor_difal, informacao_complementar, cliente_id, clientes(nome)",
     )
     .eq("canal", CANAL_ECOMMERCE_TRAY)
     .order("data_pedido", { ascending: false })
@@ -40,8 +39,9 @@ export default async function EcommercePage() {
       valor: acc.valor + p.valor_total,
       frete: acc.frete + (p.frete ?? 0),
       difal: acc.difal + (p.valor_difal ?? 0),
+      liquido: acc.liquido + (p.valor_total - (p.frete ?? 0) - (p.valor_difal ?? 0)),
     }),
-    { valor: 0, frete: 0, difal: 0 },
+    { valor: 0, frete: 0, difal: 0, liquido: 0 },
   );
   const semFreteAinda = (todos ?? []).filter((p) => p.frete === null).length;
 
@@ -78,7 +78,7 @@ export default async function EcommercePage() {
                 <th className="px-3 py-2 font-medium">Valor</th>
                 <th className="px-3 py-2 font-medium">Frete</th>
                 <th className="px-3 py-2 font-medium">ICMS DIFAL</th>
-                <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2 font-medium">Valor líquido</th>
               </tr>
             </thead>
             <tbody>
@@ -100,7 +100,9 @@ export default async function EcommercePage() {
                   <td className="px-3 py-2" title={pedido.informacao_complementar ?? undefined}>
                     {pedido.valor_difal != null ? formatMoedaBR(pedido.valor_difal) : "—"}
                   </td>
-                  <td className="px-3 py-2">{pedido.status ?? "—"}</td>
+                  <td className="px-3 py-2">
+                    {formatMoedaBR(pedido.valor_total - (pedido.frete ?? 0) - (pedido.valor_difal ?? 0))}
+                  </td>
                 </tr>
               ))}
               {pedidos.length === 0 && (
@@ -120,7 +122,7 @@ export default async function EcommercePage() {
                   <td className="px-3 py-2">{formatMoedaBR(totais.valor)}</td>
                   <td className="px-3 py-2">{formatMoedaBR(totais.frete)}</td>
                   <td className="px-3 py-2">{formatMoedaBR(totais.difal)}</td>
-                  <td className="px-3 py-2"></td>
+                  <td className="px-3 py-2">{formatMoedaBR(totais.liquido)}</td>
                 </tr>
               </tfoot>
             )}
