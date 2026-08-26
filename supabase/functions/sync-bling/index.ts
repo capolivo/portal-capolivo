@@ -369,6 +369,82 @@ async function enriquecerPedidosEcommerce(
   return { enriquecidos, falhas };
 }
 
+// Quantos pedidos sincronizar itens por execução — só 1 chamada por pedido (o
+// detalhe já traz os itens junto), mais barato que o enriquecimento de e-commerce.
+const MAX_SINCRONIZAR_ITENS = 60;
+
+// Sincroniza os itens (produtos vendidos) de TODOS os pedidos, não só e-commerce —
+// necessário pro ranking de produtos mais vendidos. Mesmo padrão de lote pequeno +
+// marca `itens_sincronizados_em`, repetindo a cada sync até cobrir o histórico.
+async function sincronizarItensPedidos(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  accessToken: string,
+  produtoBlingIdToUuid: Map<string, string>,
+): Promise<{ processados: number; falhas: number }> {
+  const { data: pendentes, error } = await supabase
+    .from("pedidos")
+    .select("id, bling_id")
+    .is("itens_sincronizados_em", null)
+    .limit(MAX_SINCRONIZAR_ITENS)
+    .returns<PedidoPendente[]>();
+
+  if (error) throw error;
+  if (!pendentes || pendentes.length === 0) return { processados: 0, falhas: 0 };
+
+  let processados = 0;
+  let falhas = 0;
+
+  for (const pedido of pendentes) {
+    if (!pedido.bling_id) continue;
+
+    try {
+      const detalheResp = await fetch(`${BLING_API_BASE}/pedidos/vendas/${pedido.bling_id}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!detalheResp.ok) {
+        throw new Error(`detalhe do pedido: ${detalheResp.status} ${await detalheResp.text()}`);
+      }
+      const detalhe = (await detalheResp.json()).data ?? {};
+      const itens: Record<string, unknown>[] = detalhe.itens ?? [];
+
+      if (itens.length > 0) {
+        const linhas = itens.map((item) => {
+          const produtoRaw = item.produto as { id?: number | string } | undefined;
+          const produtoId = produtoRaw?.id
+            ? produtoBlingIdToUuid.get(String(produtoRaw.id)) ?? null
+            : null;
+          return {
+            bling_id: String(item.id),
+            pedido_id: pedido.id,
+            produto_id: produtoId,
+            quantidade: Number(item.quantidade ?? 0),
+            valor_unitario: Number(item.valor ?? 0),
+          };
+        });
+        const { error: upsertError } = await supabase
+          .from("itens_pedido")
+          .upsert(linhas, { onConflict: "bling_id" });
+        if (upsertError) throw upsertError;
+      }
+
+      const { error: updateError } = await supabase
+        .from("pedidos")
+        .update({ itens_sincronizados_em: new Date().toISOString() })
+        .eq("id", pedido.id);
+      if (updateError) throw updateError;
+
+      processados++;
+    } catch (err) {
+      falhas++;
+      console.error(`Falha ao sincronizar itens do pedido ${pedido.bling_id}:`, err);
+    }
+
+    await sleep(PAUSA_ENTRE_CHAMADAS_MS);
+  }
+
+  return { processados, falhas };
+}
+
 Deno.serve(async (_req) => {
   const supabase = getSupabaseAdmin();
 
@@ -378,6 +454,8 @@ Deno.serve(async (_req) => {
     pedidos: 0,
     ecommerceEnriquecidos: 0,
     ecommerceFalhas: 0,
+    itensProcessados: 0,
+    itensFalhas: 0,
     erros: [] as string[],
   };
 
@@ -465,7 +543,27 @@ Deno.serve(async (_req) => {
       resultado.erros.push(`ecommerce: ${mensagem}`);
     }
 
-    // 5) Atualiza a view de métricas (RFM) usada pelo dashboard.
+    // 5) Sincroniza um lote de itens de pedido (produtos vendidos), pra ranking.
+    try {
+      const { data: produtosAtuais } = await supabase.from("produtos").select("id, bling_id");
+      const produtoBlingIdToUuid = new Map(
+        (produtosAtuais ?? [])
+          .filter((p) => p.bling_id)
+          .map((p) => [p.bling_id as string, p.id as string]),
+      );
+      const { processados, falhas } = await sincronizarItensPedidos(
+        supabase,
+        accessToken,
+        produtoBlingIdToUuid,
+      );
+      resultado.itensProcessados = processados;
+      resultado.itensFalhas = falhas;
+    } catch (err) {
+      const mensagem = err instanceof Error ? err.message : String(err);
+      resultado.erros.push(`itens_pedido: ${mensagem}`);
+    }
+
+    // 6) Atualiza a view de métricas (RFM) usada pelo dashboard.
     const { error: refreshError } = await supabase.rpc("refresh_cliente_metricas");
     if (refreshError) resultado.erros.push(`refresh_cliente_metricas: ${refreshError.message}`);
 
