@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+:root {
+  --background: #e9e2d9;
+  --foreground: #171614;
+
+  --color-capolivo-dourado: #998042;
+  --color-capolivo-dourado-claro: #b69b6b;
+  --color-capolivo-preto: #171614;
+  --color-capolivo-bege: #e9e2d9;
+
+  --color-variedade-arbequina: #b79c6b;
+  --color-variedade-koroneiki: #5f6301;
+  --color-variedade-picual: #bc7d58;
+  --color-variedade-coratina: #7d5b20;
+  --color-variedade-frantoio: #3b8476;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-dourado: var(--color-capolivo-dourado);
+  --color-dourado-claro: var(--color-capolivo-dourado-claro);
+  --color-preto: var(--color-capolivo-preto);
+  --color-bege: var(--color-capolivo-bege);
+
+  --color-arbequina: var(--color-variedade-arbequina);
+  --color-koroneiki: var(--color-variedade-koroneiki);
+  --color-picual: var(--color-variedade-picual);
+  --color-coratina: var(--color-variedade-coratina);
+  --color-frantoio: var(--color-variedade-frantoio);
+
+  --font-heading: var(--font-playfair);
+  --font-sans: var(--font-jost);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-heading), Georgia, serif;
+}
