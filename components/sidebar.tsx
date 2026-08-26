@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { href: "/clientes", label: "Clientes" },
   { href: "/produtos", label: "Produtos" },
   { href: "/pedidos", label: "Pedidos" },
+  { href: "/ecommerce", label: "E-commerce" },
 ];
 
 export function Sidebar({ userEmail }: { userEmail: string | null }) {

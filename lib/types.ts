@@ -20,6 +20,10 @@ export type Pedido = {
   valor_total: number;
   status: string | null;
   canal: string | null;
+  frete: number | null;
+  uf_destino: string | null;
+  informacao_complementar: string | null;
+  valor_difal: number | null;
 };
 
 export type Produto = {

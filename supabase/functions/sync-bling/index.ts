@@ -29,6 +29,24 @@ const BLING_ENDPOINTS = {
   pedidos: "/pedidos/vendas",
 } as const;
 
+// loja.id do canal de e-commerce (Tray) — identificado em 2026-08-26 como o canal
+// mais frequente de vendas online da Capolivo. Confirmar contra GET /canais-venda
+// se algum dia parecer errado (precisa do escopo "Canais de Venda" no app Bling).
+const CANAL_ECOMMERCE_TRAY = "204752067";
+
+// Quantos pedidos de e-commerce enriquecer (frete + DIFAL) por execução — cada um
+// custa até 2 chamadas extras ao Bling (detalhe do pedido + nota fiscal), então
+// isso fica limitado pra não estourar o tempo da Edge Function nem o rate limit
+// do Bling. Roda de novo a cada sincronização até dar conta de todo o histórico.
+const MAX_ENRIQUECER_ECOMMERCE = 25;
+// Bling limita a 3 requisições/segundo (confirmado em teste real, erro 429 em
+// 2026-08-26) — 400ms de pausa dá ~2.5 req/s, com margem de segurança.
+const PAUSA_ENTRE_CHAMADAS_MS = 400;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 type BlingAuthRow = {
   access_token: string | null;
   refresh_token: string | null;
@@ -106,6 +124,7 @@ async function fetchBlingPaginado(
   path: string,
   accessToken: string,
   desde: string | null,
+  extraParams?: Record<string, string>,
 ): Promise<Record<string, unknown>[]> {
   const items: Record<string, unknown>[] = [];
   let pagina = 1;
@@ -115,6 +134,9 @@ async function fetchBlingPaginado(
     url.searchParams.set("pagina", String(pagina));
     url.searchParams.set("limite", "100");
     if (desde) url.searchParams.set("dataAlteracaoInicial", formatBlingDateTime(desde));
+    for (const [chave, valor] of Object.entries(extraParams ?? {})) {
+      url.searchParams.set(chave, valor);
+    }
 
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -132,6 +154,10 @@ async function fetchBlingPaginado(
 
     if (pageItems.length === 0) break;
     pagina += 1;
+
+    // Bling limita a 3 requisições/segundo — sem essa pausa, listas com muitas
+    // páginas (ex.: 1700+ clientes) estouram o limite e o sync falha com 429.
+    await sleep(PAUSA_ENTRE_CHAMADAS_MS);
   }
 
   return items;
@@ -224,71 +250,232 @@ function mapPedidoFromBling(raw: Record<string, unknown>, clienteBlingIdToUuid: 
   };
 }
 
+function decodeXmlEntities(texto: string): string {
+  return texto
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .trim();
+}
+
+// "1.234,56" -> 1234.56 (formato numérico brasileiro usado no texto da nota).
+function parseNumeroBR(texto: string): number | null {
+  const numero = Number(texto.replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(numero) ? numero : null;
+}
+
+// O valor do ICMS DIFAL não é um campo próprio do Bling — quando existe, vem como
+// texto solto dentro do campo "informações complementares" (infCpl) do XML da nota
+// fiscal, algo como "... valor do ICMS DIFAL para UF de destino R$ 12,34 ...".
+function extrairDifal(infCpl: string): number | null {
+  const match = infCpl.match(/ICMS\s*DIFAL[^\d]*R\$\s*([\d.,]+)/i);
+  return match ? parseNumeroBR(match[1]) : null;
+}
+
+type PedidoPendente = { id: string; bling_id: string | null };
+
+// Enriquece pedidos do canal de e-commerce com frete e informação de ICMS DIFAL —
+// dados que só existem no detalhe do pedido / nota fiscal, não na listagem padrão.
+// Processa em lotes pequenos (MAX_ENRIQUECER_ECOMMERCE) e marca cada pedido tratado
+// em `detalhe_sincronizado_em`, então roda de novo a cada sync até cobrir tudo.
+async function enriquecerPedidosEcommerce(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  accessToken: string,
+): Promise<{ enriquecidos: number; falhas: number }> {
+  const { data: pendentes, error } = await supabase
+    .from("pedidos")
+    .select("id, bling_id")
+    .eq("canal", CANAL_ECOMMERCE_TRAY)
+    .is("detalhe_sincronizado_em", null)
+    .limit(MAX_ENRIQUECER_ECOMMERCE)
+    .returns<PedidoPendente[]>();
+
+  if (error) throw error;
+  if (!pendentes || pendentes.length === 0) return { enriquecidos: 0, falhas: 0 };
+
+  let enriquecidos = 0;
+  let falhas = 0;
+
+  for (const pedido of pendentes) {
+    if (!pedido.bling_id) continue;
+
+    try {
+      const detalheResp = await fetch(`${BLING_API_BASE}/pedidos/vendas/${pedido.bling_id}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!detalheResp.ok) {
+        throw new Error(`detalhe do pedido: ${detalheResp.status} ${await detalheResp.text()}`);
+      }
+      const detalhe = (await detalheResp.json()).data ?? {};
+      const transporte = detalhe.transporte ?? {};
+      const frete = typeof transporte.frete === "number" ? transporte.frete : null;
+      const ufDestino = transporte.etiqueta?.uf || null;
+      const notaFiscalId = detalhe.notaFiscal?.id;
+
+      let informacaoComplementar: string | null = null;
+      let valorDifal: number | null = null;
+
+      if (notaFiscalId) {
+        await sleep(PAUSA_ENTRE_CHAMADAS_MS);
+        const nfeResp = await fetch(`${BLING_API_BASE}/nfe/${notaFiscalId}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (nfeResp.ok) {
+          const nfe = (await nfeResp.json()).data ?? {};
+          // O campo "xml" não é o XML em si — é uma URL assinada pra baixá-lo.
+          // Só existe depois que a nota é autorizada pela Sefaz (chaveAcesso
+          // preenchida); antes disso vem vazio.
+          const xmlUrl: string = nfe.xml || "";
+          if (xmlUrl) {
+            await sleep(PAUSA_ENTRE_CHAMADAS_MS);
+            const xmlResp = await fetch(xmlUrl);
+            if (xmlResp.ok) {
+              const xml = await xmlResp.text();
+              const match = xml.match(/<infCpl>([\s\S]*?)<\/infCpl>/);
+              if (match) {
+                informacaoComplementar = decodeXmlEntities(match[1]);
+                valorDifal = extrairDifal(informacaoComplementar);
+              }
+            }
+          }
+        }
+        // Falha ao buscar a nota fiscal/XML não invalida o resto do enriquecimento
+        // (frete já foi obtido) — só fica sem o DIFAL desta vez.
+      }
+
+      const { error: updateError } = await supabase
+        .from("pedidos")
+        .update({
+          frete,
+          uf_destino: ufDestino,
+          informacao_complementar: informacaoComplementar,
+          valor_difal: valorDifal,
+          detalhe_sincronizado_em: new Date().toISOString(),
+        })
+        .eq("id", pedido.id);
+      if (updateError) throw updateError;
+
+      enriquecidos++;
+    } catch (err) {
+      falhas++;
+      console.error(`Falha ao enriquecer pedido ${pedido.bling_id}:`, err);
+    }
+
+    await sleep(PAUSA_ENTRE_CHAMADAS_MS);
+  }
+
+  return { enriquecidos, falhas };
+}
+
 Deno.serve(async (_req) => {
   const supabase = getSupabaseAdmin();
+
+  const resultado = {
+    produtos: 0,
+    clientes: 0,
+    pedidos: 0,
+    ecommerceEnriquecidos: 0,
+    ecommerceFalhas: 0,
+    erros: [] as string[],
+  };
 
   try {
     const accessToken = await getValidAccessToken(supabase);
 
-    // 1) Produtos
-    const desdeProdutos = await getUltimaSincronizacao(supabase, "produtos");
-    const produtosRaw = await fetchBlingPaginado(BLING_ENDPOINTS.produtos, accessToken, desdeProdutos);
-    if (produtosRaw.length > 0) {
-      const { error } = await supabase
-        .from("produtos")
-        .upsert(produtosRaw.map(mapProdutoFromBling), { onConflict: "bling_id" });
-      if (error) throw error;
+    // 1) Produtos. tipo=P filtra só produtos simples — sem esse filtro, o Bling
+    // vem retornando erro 400 ("MISSING_REQUIRED_FIELD_ERROR ... produto Loja")
+    // pra algum registro fora desse tipo (variação/estrutura/serviço). Confirmado
+    // em 2026-08-26 que o filtro contorna o problema.
+    try {
+      const desdeProdutos = await getUltimaSincronizacao(supabase, "produtos");
+      const produtosRaw = await fetchBlingPaginado(BLING_ENDPOINTS.produtos, accessToken, desdeProdutos, {
+        tipo: "P",
+      });
+      if (produtosRaw.length > 0) {
+        const { error } = await supabase
+          .from("produtos")
+          .upsert(produtosRaw.map(mapProdutoFromBling), { onConflict: "bling_id" });
+        if (error) throw error;
+      }
+      resultado.produtos = produtosRaw.length;
+      await marcarSincronizado(supabase, "produtos", "ok");
+    } catch (err) {
+      const mensagem = err instanceof Error ? err.message : String(err);
+      resultado.erros.push(`produtos: ${mensagem}`);
+      await marcarSincronizado(supabase, "produtos", "erro", mensagem);
     }
-    await marcarSincronizado(supabase, "produtos", "ok");
 
-    // 2) Clientes
-    const desdeClientes = await getUltimaSincronizacao(supabase, "clientes");
-    const clientesRaw = await fetchBlingPaginado(BLING_ENDPOINTS.clientes, accessToken, desdeClientes);
-    if (clientesRaw.length > 0) {
-      const { error } = await supabase
-        .from("clientes")
-        .upsert(clientesRaw.map(mapClienteFromBling), { onConflict: "bling_id" });
-      if (error) throw error;
+    // 2) Clientes — cada etapa é independente: se uma falhar, as outras seguem
+    // rodando (por ex. um bug pontual do Bling em /produtos não deve travar a
+    // sincronização de pedidos, que é o que alimenta a aba E-commerce).
+    try {
+      const desdeClientes = await getUltimaSincronizacao(supabase, "clientes");
+      const clientesRaw = await fetchBlingPaginado(BLING_ENDPOINTS.clientes, accessToken, desdeClientes);
+      if (clientesRaw.length > 0) {
+        const { error } = await supabase
+          .from("clientes")
+          .upsert(clientesRaw.map(mapClienteFromBling), { onConflict: "bling_id" });
+        if (error) throw error;
+      }
+      resultado.clientes = clientesRaw.length;
+      await marcarSincronizado(supabase, "clientes", "ok");
+    } catch (err) {
+      const mensagem = err instanceof Error ? err.message : String(err);
+      resultado.erros.push(`clientes: ${mensagem}`);
+      await marcarSincronizado(supabase, "clientes", "erro", mensagem);
     }
-    await marcarSincronizado(supabase, "clientes", "ok");
 
-    // 3) Pedidos (depende do mapeamento bling_id -> uuid de clientes já sincronizados)
-    const { data: clientesAtuais } = await supabase.from("clientes").select("id, bling_id");
-    const clienteBlingIdToUuid = new Map(
-      (clientesAtuais ?? [])
-        .filter((c) => c.bling_id)
-        .map((c) => [c.bling_id as string, c.id as string]),
-    );
+    // 3) Pedidos (depende do mapeamento bling_id -> uuid de clientes já sincronizados,
+    // lido direto do banco — usa o que já tiver, mesmo se o passo 2 falhou acima).
+    try {
+      const { data: clientesAtuais } = await supabase.from("clientes").select("id, bling_id");
+      const clienteBlingIdToUuid = new Map(
+        (clientesAtuais ?? [])
+          .filter((c) => c.bling_id)
+          .map((c) => [c.bling_id as string, c.id as string]),
+      );
 
-    const desdePedidos = await getUltimaSincronizacao(supabase, "pedidos");
-    const pedidosRaw = await fetchBlingPaginado(BLING_ENDPOINTS.pedidos, accessToken, desdePedidos);
-    if (pedidosRaw.length > 0) {
-      const { error } = await supabase
-        .from("pedidos")
-        .upsert(pedidosRaw.map((p) => mapPedidoFromBling(p, clienteBlingIdToUuid)), {
-          onConflict: "bling_id",
-        });
-      if (error) throw error;
+      const desdePedidos = await getUltimaSincronizacao(supabase, "pedidos");
+      const pedidosRaw = await fetchBlingPaginado(BLING_ENDPOINTS.pedidos, accessToken, desdePedidos);
+      if (pedidosRaw.length > 0) {
+        const { error } = await supabase
+          .from("pedidos")
+          .upsert(pedidosRaw.map((p) => mapPedidoFromBling(p, clienteBlingIdToUuid)), {
+            onConflict: "bling_id",
+          });
+        if (error) throw error;
+      }
+      resultado.pedidos = pedidosRaw.length;
+      await marcarSincronizado(supabase, "pedidos", "ok");
+    } catch (err) {
+      const mensagem = err instanceof Error ? err.message : String(err);
+      resultado.erros.push(`pedidos: ${mensagem}`);
+      await marcarSincronizado(supabase, "pedidos", "erro", mensagem);
     }
-    await marcarSincronizado(supabase, "pedidos", "ok");
 
-    // 4) Atualiza a view de métricas (RFM) usada pelo dashboard.
+    // 4) Enriquece um lote de pedidos de e-commerce com frete e DIFAL.
+    try {
+      const { enriquecidos, falhas } = await enriquecerPedidosEcommerce(supabase, accessToken);
+      resultado.ecommerceEnriquecidos = enriquecidos;
+      resultado.ecommerceFalhas = falhas;
+    } catch (err) {
+      const mensagem = err instanceof Error ? err.message : String(err);
+      resultado.erros.push(`ecommerce: ${mensagem}`);
+    }
+
+    // 5) Atualiza a view de métricas (RFM) usada pelo dashboard.
     const { error: refreshError } = await supabase.rpc("refresh_cliente_metricas");
-    if (refreshError) throw refreshError;
+    if (refreshError) resultado.erros.push(`refresh_cliente_metricas: ${refreshError.message}`);
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        produtos: produtosRaw.length,
-        clientes: clientesRaw.length,
-        pedidos: pedidosRaw.length,
-      }),
-      { headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ ok: resultado.erros.length === 0, ...resultado }), {
+      headers: { "Content-Type": "application/json" },
+    });
   } catch (err) {
     const mensagem = err instanceof Error ? err.message : String(err);
     await marcarSincronizado(supabase, "sync-bling", "erro", mensagem);
-    return new Response(JSON.stringify({ ok: false, error: mensagem }), {
+    return new Response(JSON.stringify({ ok: false, error: mensagem, ...resultado }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
     });
