@@ -28,8 +28,24 @@ export default async function EcommercePage() {
     .limit(200)
     .returns<PedidoEcommerce[]>();
 
+  // Totais consideram TODOS os pedidos de e-commerce, não só os 200 exibidos na tabela.
+  const { data: todos } = await supabase
+    .from("pedidos")
+    .select("valor_total, frete, valor_difal")
+    .eq("canal", CANAL_ECOMMERCE_TRAY)
+    .returns<{ valor_total: number; frete: number | null; valor_difal: number | null }[]>();
+
+  const totais = (todos ?? []).reduce(
+    (acc, p) => ({
+      valor: acc.valor + p.valor_total,
+      frete: acc.frete + (p.frete ?? 0),
+      difal: acc.difal + (p.valor_difal ?? 0),
+    }),
+    { valor: 0, frete: 0, difal: 0 },
+  );
+  const semFreteAinda = (todos ?? []).filter((p) => p.frete === null).length;
+
   const pedidos = data ?? [];
-  const semFreteAinda = pedidos.filter((p) => p.frete === null).length;
 
   return (
     <div>
@@ -95,6 +111,19 @@ export default async function EcommercePage() {
                 </tr>
               )}
             </tbody>
+            {pedidos.length > 0 && (
+              <tfoot>
+                <tr className="border-t-2 border-preto/20 bg-bege font-medium">
+                  <td className="px-3 py-2" colSpan={3}>
+                    Total ({(todos ?? []).length} pedidos)
+                  </td>
+                  <td className="px-3 py-2">{formatMoedaBR(totais.valor)}</td>
+                  <td className="px-3 py-2">{formatMoedaBR(totais.frete)}</td>
+                  <td className="px-3 py-2">{formatMoedaBR(totais.difal)}</td>
+                  <td className="px-3 py-2"></td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       )}
