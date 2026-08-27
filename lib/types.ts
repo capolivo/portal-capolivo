@@ -34,3 +34,23 @@ export type Produto = {
   formato: string | null;
   sku: string | null;
 };
+
+export type EstoqueSaldo = {
+  produto_id: string;
+  nome: string;
+  sku: string | null;
+  variedade: string | null;
+  formato: string | null;
+  saldo: number;
+  ultima_movimentacao_em: string | null;
+};
+
+export type EstoqueMovimento = {
+  id: string;
+  produto_id: string;
+  tipo: "envase" | "venda" | "ajuste";
+  quantidade: number;
+  observacao: string | null;
+  criado_em: string;
+  criado_por: string | null;
+};

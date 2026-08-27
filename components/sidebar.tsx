@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/produtos", label: "Produtos" },
   { href: "/pedidos", label: "Pedidos" },
   { href: "/ecommerce", label: "E-commerce" },
+  { href: "/estoque", label: "Estoque" },
 ];
 
 export function Sidebar({ userEmail }: { userEmail: string | null }) {

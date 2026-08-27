@@ -445,6 +445,58 @@ async function sincronizarItensPedidos(
   return { processados, falhas };
 }
 
+type ItemPendenteEstoque = { id: string; produto_id: string | null; quantidade: number };
+
+// Dá baixa automática no estoque pra cada item de pedido novo (venda), sem
+// nenhuma chamada ao Bling — é só matemática em cima do que já foi sincronizado.
+// Itens de pedidos antigos (histórico) já foram marcados como "baixados" na
+// migration que criou o controle de estoque, então só entra aqui o que é
+// genuinamente novo a partir de quando o controle começou.
+async function baixarEstoqueVendas(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+): Promise<{ processados: number; falhas: number }> {
+  const { data: pendentes, error } = await supabase
+    .from("itens_pedido")
+    .select("id, produto_id, quantidade")
+    .is("estoque_baixado_em", null)
+    .not("produto_id", "is", null)
+    .limit(500)
+    .returns<ItemPendenteEstoque[]>();
+
+  if (error) throw error;
+  if (!pendentes || pendentes.length === 0) return { processados: 0, falhas: 0 };
+
+  let processados = 0;
+  let falhas = 0;
+
+  for (const item of pendentes) {
+    try {
+      const { error: insertError } = await supabase.from("estoque_movimentos").insert({
+        produto_id: item.produto_id,
+        tipo: "venda",
+        quantidade: -Math.abs(item.quantidade),
+        origem_item_pedido_id: item.id,
+      });
+      // Índice único em origem_item_pedido_id: se já existir (reprocessamento),
+      // ignora o erro de duplicidade e só marca como baixado mesmo assim.
+      if (insertError && insertError.code !== "23505") throw insertError;
+
+      const { error: updateError } = await supabase
+        .from("itens_pedido")
+        .update({ estoque_baixado_em: new Date().toISOString() })
+        .eq("id", item.id);
+      if (updateError) throw updateError;
+
+      processados++;
+    } catch (err) {
+      falhas++;
+      console.error(`Falha ao baixar estoque do item ${item.id}:`, err);
+    }
+  }
+
+  return { processados, falhas };
+}
+
 Deno.serve(async (_req) => {
   const supabase = getSupabaseAdmin();
 
@@ -456,6 +508,8 @@ Deno.serve(async (_req) => {
     ecommerceFalhas: 0,
     itensProcessados: 0,
     itensFalhas: 0,
+    estoqueBaixado: 0,
+    estoqueFalhas: 0,
     erros: [] as string[],
   };
 
@@ -563,7 +617,18 @@ Deno.serve(async (_req) => {
       resultado.erros.push(`itens_pedido: ${mensagem}`);
     }
 
-    // 6) Atualiza a view de métricas (RFM) usada pelo dashboard.
+    // 6) Baixa automática de estoque pras vendas novas (só itens sincronizados
+    // depois que o controle de estoque começou — ver migration 0006_estoque.sql).
+    try {
+      const { processados, falhas } = await baixarEstoqueVendas(supabase);
+      resultado.estoqueBaixado = processados;
+      resultado.estoqueFalhas = falhas;
+    } catch (err) {
+      const mensagem = err instanceof Error ? err.message : String(err);
+      resultado.erros.push(`estoque: ${mensagem}`);
+    }
+
+    // 7) Atualiza a view de métricas (RFM) usada pelo dashboard.
     const { error: refreshError } = await supabase.rpc("refresh_cliente_metricas");
     if (refreshError) resultado.erros.push(`refresh_cliente_metricas: ${refreshError.message}`);
 
